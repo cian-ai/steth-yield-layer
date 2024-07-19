@@ -1,0 +1,9 @@
+.DS_Store
+artifacts/
+cache/
+db/
+deployments/hardhat
+deployments/localhost
+node_modules/
+.vscode/
+abigen

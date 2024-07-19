@@ -1,0 +1,15 @@
+{
+    "CHAIN_NAME": "Ethereum Mainnet",
+    "LOCAL_RPC_PORT": 18545,
+    "TEST_RPC": "http://192.168.1.102:10087",
+    "FORK_RPC": "http://192.168.1.104:10005",
+    "SELF_RPC": "http://192.168.1.104:10005",
+    "PUBLIC_RPC": [
+        "https://1rpc.io/eth",
+        "https://eth.llamarpc.com",
+        "https://rpc.flashbots.net",
+        "https://ethereum.publicnode.com",
+        "https://rpc.mevblocker.io"
+    ],
+    "BLOCK_EXPLORER_API_KEY": "???"
+}
