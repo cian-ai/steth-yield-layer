@@ -25,8 +25,8 @@ contract StrategyAAVEV3 is IStrategy, MultiETH, OneInchCallerV6, OwnableUpgradea
     // The version of the contract
     string public constant VERSION = "1.0";
 
-    // The maximum allowable ratio for the protocol, set to 85%
-    uint256 public constant MAX_PROTOCOL_RATIO = 0.85e18;
+    // The maximum allowable ratio for the protocol, set to 93%
+    uint256 public constant MAX_PROTOCOL_RATIO = 0.93e18;
 
     // The address of the AAVE v3 aToken for wstETH
     address internal constant A_WSTETH_AAVEV3 = 0x0B925eD163218f6662a35e0f0371Ac234f9E9371;
@@ -119,6 +119,12 @@ contract StrategyAAVEV3 is IStrategy, MultiETH, OneInchCallerV6, OwnableUpgradea
         if (_newRebalancer == address(0)) revert Errors.InvalidRebalancer();
         emit UpdateRebalancer(rebalancer, _newRebalancer);
         rebalancer = _newRebalancer;
+    }
+
+    function updateSafeProtocolRatio(uint256 _newRatio) external onlyOwner {
+        if (_newRatio > MAX_PROTOCOL_RATIO) revert Errors.InvalidSafeProtocolRatio();
+        emit UpdateSafeProtocolRatio(safeProtocolRatio, _newRatio);
+        safeProtocolRatio = _newRatio;
     }
 
     function convertToken(address _srcToken, address _toToken, uint256 _amount) external onlyRebalancer {

@@ -29,14 +29,12 @@ async function initializeRedeemOperator() {
 async function addFlashloanWhitelist() {
     console.log("addFlashloanWhitelist");
 
-    const FlashloanHelper = await ethers.getContractAt(
-        "IFlashloanHelper",
-        "0x49d9409111a6363d82C4371fFa43fAEA660C917B"
-    );
+    const FlashloanHelper = await ethers.getContractAt("IFlashloanHelper", "0x49d9409111a6363d82C4371fFa43fAEA660C917B");
     const admin = await impersonateAccount("0x12A59eab07b1Cdd176dad9E4cBbe7Dd973C95d0E");
     await FlashloanHelper.connect(admin).addToWhitelist(Project.StrategyAAVEV3);
     await FlashloanHelper.connect(admin).addToWhitelist(Project.StrategyAAVEV3LIDO);
     await FlashloanHelper.connect(admin).addToWhitelist(Project.StrategyMorphoBlueRSETH);
+    await FlashloanHelper.connect(admin).addToWhitelist(Project.StrategyCompoundRSETH);
 }
 
 async function removeCap() {

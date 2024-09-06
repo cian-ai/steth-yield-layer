@@ -3,11 +3,8 @@ pragma solidity ^0.8.25;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
-import "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
-import "@morpho-org/morpho-blue/src/libraries/periphery/MorphoStorageLib.sol";
-import "@morpho-org/morpho-blue/src/libraries/MarketParamsLib.sol";
-import "@morpho-org/morpho-blue/src/interfaces/IOracle.sol";
+import "../../../interfaces/compound/ICWETHV3.sol";
+import "../../../interfaces/compound/ICometRewards.sol";
 import "../../../interfaces/flashloanHelper/IFlashloanHelper.sol";
 import "../../../interfaces/IStrategy.sol";
 import "../../../interfaces/kelp/ILRTDepositPool.sol";
@@ -19,13 +16,12 @@ import "../../swap/OneInchCallerV6.sol";
 import "../../common/MultiETH.sol";
 
 /**
- * @title StrategyMorphoBlueRSETH contract
+ * @title StrategyCompoundRSETH contract
  * @author Naturelab
  * @dev This contract is the actual address of the strategy pool.
  */
-contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, OwnableUpgradeable {
+contract StrategyCompoundRSETH is IStrategy, MultiETH, OneInchCallerV6, OwnableUpgradeable {
     using SafeERC20 for IERC20;
-    using MorphoBalancesLib for IMorpho;
 
     // The version of the contract
     string public constant VERSION = "1.0";
@@ -33,12 +29,18 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
     // The maximum allowable ratio for the protocol, set to 91%
     uint256 public constant MAX_PROTOCOL_RATIO = 0.91e18;
 
-    ILRTDepositPool internal constant kelpPool = ILRTDepositPool(0x036676389e48133B63a802f8635AD39E752D375D);
+    ICWETHV3 internal constant compoundWethComet = ICWETHV3(0xA17581A9E3356d9A858b789D68B4d866e593aE94);
 
-    ILRTOracle internal constant kelpOracle = ILRTOracle(0x349A73444b1a310BAe67ef67973022020d70020d);
+    ICometRewards internal constant cometRewards = ICometRewards(0x1B0e765F6224C21223AeA2af16c1C46E38885a40);
+
+    IERC20 internal constant compoundToken = IERC20(0xc00e94Cb662C3520282E6f5717214004A7f26888);
 
     ILRTWithdrawalManager internal constant kelpWithdrawal =
         ILRTWithdrawalManager(0x62De59c08eB5dAE4b7E6F7a8cAd3006d6965ec16);
+
+    ILRTOracle internal constant kelpOracle = ILRTOracle(0x349A73444b1a310BAe67ef67973022020d70020d);
+
+    ILRTDepositPool internal constant kelpPool = ILRTDepositPool(0x036676389e48133B63a802f8635AD39E752D375D);
 
     address public constant RSETH = 0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7;
 
@@ -65,22 +67,19 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
 
     bytes32 public requestId;
 
-    //Morpho
-    address internal constant MORPHO_POOL = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
-    address internal constant MORPHO_Oracle = 0x423671566dE77E9Cb50E9bE4383BA78fFC808a4e;
-    address internal constant MORPHO_IRM = 0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC;
-    uint256 internal constant MORPHO_LLTV = 860000000000000000;
-
     event UpdateFlashloanHelper(address oldFlashloanHelper, address newFlashloanHelper);
     event UpdateRebalancer(address oldRebalancer, address newRebalancer);
     event UpdateSafeProtocolRatio(uint256 oldSafeProtocolRatio, uint256 newSafeProtocolRatio);
     event OnTransferIn(address token, uint256 amount);
     event TransferToVault(address token, uint256 amount);
+    event SwapToken(uint256 amount, address srcToken, address dstToken, uint256 swapGet);
     event Stake(uint256 amount);
     event Unstake(uint256 amount);
     event ConfirmUnstake();
     event Leverage(uint256 deposit, uint256 debtAmount, bytes swapData, uint256 flashloanSelector);
     event Deleverage(uint256 deleverageAmount, uint256 withdrawAmount, bytes swapData, uint256 flashloanSelector);
+    event Repay(uint256 amount);
+    event ClaimAndSwap(uint256 claimed, uint256 returnAmount);
 
     /**
      * @dev Ensure that this method is only called by the Vault contract.
@@ -108,14 +107,15 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         __Ownable_init(_admin);
         if (_admin == address(0)) revert Errors.InvalidAdmin();
         if (_flashloanHelper == address(0)) revert Errors.InvalidFlashloanHelper();
-        if (_safeProtocolRatio > MORPHO_LLTV) revert Errors.InvalidSafeProtocolRatio();
+        if (_safeProtocolRatio > MAX_PROTOCOL_RATIO) revert Errors.InvalidSafeProtocolRatio();
         if (_rebalancer == address(0)) revert Errors.InvalidRebalancer();
         flashloanHelper = _flashloanHelper;
         safeProtocolRatio = _safeProtocolRatio;
         rebalancer = _rebalancer;
         vault = msg.sender;
-        enterProtocol();
-        IERC20(STETH).safeIncreaseAllowance(WSTETH, type(uint256).max);
+
+        IERC20(RSETH).safeIncreaseAllowance(address(compoundWethComet), type(uint256).max);
+        IERC20(WETH).safeIncreaseAllowance(address(compoundWethComet), type(uint256).max);
     }
 
     /**
@@ -180,6 +180,20 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         emit TransferToVault(_token, _amount);
     }
 
+    function swapToken(
+        uint256 _amount,
+        address _srcToken,
+        address _dstToken,
+        bytes memory _swapData,
+        uint256 _swapGetMin
+    ) external onlyRebalancer {
+        if (_srcToken != RSETH || _dstToken != STETH) revert Errors.UnSupportedOperation();
+        IERC20(_srcToken).safeIncreaseAllowance(ONEINCH_ROUTER, _amount);
+        (uint256 return_,) = executeSwap(_amount, _srcToken, _dstToken, _swapData, _swapGetMin);
+
+        emit SwapToken(_amount, _srcToken, _dstToken, return_);
+    }
+
     /**
      * @dev stake STETH to RSETH.
      */
@@ -191,17 +205,18 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
     }
 
     /**
-     * @dev unstake RSETH to STETH.
+     * @dev unstake RSETH to STETH/ETH.
      */
-    function unstake(uint256 _rsAmount) external onlyRebalancer {
+    function unstake(uint256 _rsAmount, address _toToken) external onlyRebalancer {
         if (requestId != bytes32(0)) revert Errors.UnSupportedOperation();
-        uint256 nextUnusedNonce_ = kelpWithdrawal.nextUnusedNonce(STETH);
-        bytes32 newRequestId_ = kelpWithdrawal.getRequestId(STETH, nextUnusedNonce_);
+        if (_toToken != STETH && _toToken != ETH) revert Errors.UnsupportedToken();
+        uint256 nextUnusedNonce_ = kelpWithdrawal.nextUnusedNonce(_toToken);
+        bytes32 newRequestId_ = kelpWithdrawal.getRequestId(_toToken, nextUnusedNonce_);
         IERC20(RSETH).safeIncreaseAllowance(address(kelpWithdrawal), _rsAmount);
 
-        kelpWithdrawal.initiateWithdrawal(STETH, _rsAmount);
+        kelpWithdrawal.initiateWithdrawal(_toToken, _rsAmount);
         (uint256 rsETHUnstaked_,, uint256 withdrawalStartBlock_, uint256 userNonce_) =
-            kelpWithdrawal.getUserWithdrawalRequest(STETH, address(this), 0);
+            kelpWithdrawal.getUserWithdrawalRequest(_toToken, address(this), 0);
         if (rsETHUnstaked_ != _rsAmount || withdrawalStartBlock_ != block.number || nextUnusedNonce_ != userNonce_) {
             revert Errors.IncorrectState();
         }
@@ -210,9 +225,11 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         emit Unstake(_rsAmount);
     }
 
-    function confirmUnstake() external onlyRebalancer {
+    function confirmUnstake(address _toToken) external onlyRebalancer {
         if (requestId == bytes32(0)) revert Errors.UnSupportedOperation();
-        kelpWithdrawal.completeWithdrawal(STETH);
+        if (_toToken != STETH && _toToken != ETH) revert Errors.UnsupportedToken();
+        kelpWithdrawal.completeWithdrawal(_toToken);
+        requestId = bytes32(0);
 
         emit ConfirmUnstake();
     }
@@ -271,10 +288,10 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         emit Deleverage(_deleverageAmount, _withdraw, _swapData, _flashloanSelector);
     }
 
-    function getKelpUnstakingAmount() public view returns (uint256) {
-        if (requestId == bytes32(0)) return 0;
-        (, uint256 expectedAssetAmount_,) = kelpWithdrawal.withdrawalRequests(requestId);
-        return expectedAssetAmount_;
+    function repay(uint256 _amount) external onlyRebalancer {
+        executeRepay(WETH, _amount);
+
+        emit Repay(_amount);
     }
 
     /**
@@ -310,30 +327,12 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         return kelpPool.getRsETHAmountToMint(ETH, _ethAmount);
     }
 
-    function getMarketParams() public pure returns (MarketParams memory) {
-        return MarketParams({
-            loanToken: WETH,
-            collateralToken: RSETH,
-            oracle: MORPHO_Oracle,
-            irm: MORPHO_IRM,
-            lltv: MORPHO_LLTV
-        });
-    }
+    function claimAndSwap(bytes calldata _swapData, uint256 _swapGetMin) external onlyRebalancer {
+        cometRewards.claim(address(compoundWethComet), address(this), true);
+        uint256 amount_ = compoundToken.balanceOf(address(this));
+        (uint256 return_,) = executeSwap(amount_, address(compoundToken), RSETH, _swapData, _swapGetMin);
 
-    function supplyAssetsUser() public view returns (uint256 totalSupplyAssets) {
-        totalSupplyAssets = IMorpho(MORPHO_POOL).expectedSupplyAssets(getMarketParams(), address(this));
-    }
-
-    function collateralAssetsUser() public view returns (uint256 totalCollateralAssets) {
-        bytes32[] memory slots = new bytes32[](1);
-        slots[0] =
-            MorphoStorageLib.positionBorrowSharesAndCollateralSlot(MarketParamsLib.id(getMarketParams()), address(this));
-        bytes32[] memory values = IMorpho(MORPHO_POOL).extSloads(slots);
-        totalCollateralAssets = uint256(values[0] >> 128);
-    }
-
-    function borrowAssetsUser() public view returns (uint256 totalBorrowAssets) {
-        totalBorrowAssets = IMorpho(MORPHO_POOL).expectedBorrowAssets(getMarketParams(), address(this));
+        emit ClaimAndSwap(return_, amount_);
     }
 
     /**
@@ -341,32 +340,35 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
      * @return availableBorrowsETH_ The amount of available borrows in ETH.
      */
     function getAvailableBorrowsETH() public view returns (uint256 availableBorrowsETH_) {
-        uint256 rsETHAmount_ = collateralAssetsUser();
-        uint256 maxBorrowsETH_ = rsETHAmount_ * IOracle(MORPHO_Oracle).price() * MORPHO_LLTV / 1e54; //1e36*1e18
-        uint256 debtWEthAmount_ = borrowAssetsUser();
-        availableBorrowsETH_ = maxBorrowsETH_ > debtWEthAmount_ ? (maxBorrowsETH_ - debtWEthAmount_) : 0;
+        ICWETHV3.AssetInfo memory assetInfo_ = compoundWethComet.getAssetInfoByAddress(RSETH);
+        uint256 price_ = compoundWethComet.getPrice(assetInfo_.priceFeed);
+        uint256 collateralBalance_ = compoundWethComet.collateralBalanceOf(address(this), RSETH);
+        uint256 borrowedBalance_ = compoundWethComet.borrowBalanceOf(address(this));
+        availableBorrowsETH_ =
+            (collateralBalance_ * price_ * assetInfo_.borrowCollateralFactor) / 1e26 - borrowedBalance_;
     }
 
     /**
      * @dev Get the available withdrawable amount in rsETH.
-     * @return maxWithdrawsRSETH_ The maximum amount of rsETH that can be withdrawn.
+     * @return maxWithdrawsRsETH_ The maximum amount of rsETH that can be withdrawn.
      */
-    function getAvailableWithdrawsRSETH() public view returns (uint256 maxWithdrawsRSETH_) {
-        uint256 rsETHPrice_ = IOracle(MORPHO_Oracle).price();
-        uint256 colInEthScale_ = collateralAssetsUser() * rsETHPrice_;
-        uint256 debtInEthScale_ = borrowAssetsUser() * 1e36;
-        if (colInEthScale_ > 0) {
-            uint256 colMin_ = debtInEthScale_ * PRECISION / MORPHO_LLTV;
-            uint256 maxWithdrawsInEthScale_ = colInEthScale_ > colMin_ ? colInEthScale_ - colMin_ : 0;
-            maxWithdrawsRSETH_ = maxWithdrawsInEthScale_ / rsETHPrice_;
-        }
+    function getAvailableWithdrawsRSETH() public view returns (uint256 maxWithdrawsRsETH_) {
+        ICWETHV3.AssetInfo memory assetInfo_ = compoundWethComet.getAssetInfoByAddress(RSETH);
+        uint256 price_ = compoundWethComet.getPrice(assetInfo_.priceFeed);
+        uint256 collateralBalance_ = compoundWethComet.collateralBalanceOf(address(this), RSETH);
+        uint256 borrowedBalance_ = compoundWethComet.borrowBalanceOf(address(this));
+        uint256 collateralMin_ = (borrowedBalance_ * 1e26) / (assetInfo_.borrowCollateralFactor * price_);
+        maxWithdrawsRsETH_ = collateralBalance_ - collateralMin_;
     }
 
     function getRatio() public view returns (uint256 ratio_) {
-        uint256 rsETHAmount_ = collateralAssetsUser();
-        uint256 debtWETHAmount_ = borrowAssetsUser();
-        uint256 debtRSETHAmount_ = getRsETHByStETH(debtWETHAmount_);
-        ratio_ = rsETHAmount_ > 0 ? (debtRSETHAmount_ * PRECISION / rsETHAmount_) : 0;
+        (uint256 underlyingTokenAmount_, uint256 debtInUnderlyingTokenAmount_) = getProtocolAccountData();
+        ratio_ = underlyingTokenAmount_ == 0 ? 0 : debtInUnderlyingTokenAmount_ * PRECISION / underlyingTokenAmount_;
+    }
+
+    function getRewardOwed() public returns (uint256 rewardAmount_) {
+        ICometRewards.RewardOwed memory reward_ = cometRewards.getRewardOwed(address(compoundWethComet), address(this));
+        rewardAmount_ = reward_.owed;
     }
 
     /**
@@ -375,15 +377,17 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
      * @return isOK_ Boolean indicating whether the ratio is within safe limits.
      */
     function getCollateralRatio() public view returns (uint256 collateralRatio_, bool isOK_) {
-        uint256 rsETHAmount_ = collateralAssetsUser();
-        uint256 debtWETHAmount_ = borrowAssetsUser();
-        uint256 rsETHPrice_ = IOracle(MORPHO_Oracle).price() / PRECISION;
-        collateralRatio_ = rsETHAmount_ > 0 ? (debtWETHAmount_ * PRECISION / (rsETHAmount_ * rsETHPrice_)) : 0;
-        isOK_ = safeProtocolRatio + permissibleLimit > collateralRatio_;
+        ICWETHV3.AssetInfo memory assetInfo_ = compoundWethComet.getAssetInfoByAddress(RSETH);
+        uint256 price_ = compoundWethComet.getPrice(assetInfo_.priceFeed);
+        uint256 collateralBalance_ = compoundWethComet.collateralBalanceOf(address(this), RSETH);
+        uint256 borrowedBalance_ = compoundWethComet.borrowBalanceOf(address(this));
+        collateralRatio_ =
+            collateralBalance_ == 0 ? 0 : borrowedBalance_ * PRECISION / (collateralBalance_ * price_ / 1e8);
+        isOK_ = collateralRatio_ < safeProtocolRatio;
     }
 
     /**
-     * @dev Get the amount for leverage or deleverage operation.
+     * @dev Get the amount for leverage or deleverage operation
      * @param _isDepositOrWithdraw Boolean indicating whether the operation is a deposit or withdrawal.
      * @param _depositOrWithdraw The amount to deposit or withdraw.
      * @return isLeverage_ Boolean indicating whether the operation is leverage.
@@ -394,37 +398,62 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         view
         returns (bool isLeverage_, uint256 loanAmount_)
     {
-        uint256 rsEthPrice_ = IOracle(MORPHO_Oracle).price() / PRECISION;
-        uint256 ethPrice_ = PRECISION;
-        uint256 totalCollateralETH_ = collateralAssetsUser() * rsEthPrice_ / ethPrice_;
-        uint256 totalDebtETH_ = borrowAssetsUser();
-        uint256 depositOrWithdrawInETH_ = IWstETH(WSTETH).getWstETHByStETH(_depositOrWithdraw) * rsEthPrice_ / ethPrice_;
-
-        totalCollateralETH_ = _isDepositOrWithdraw
-            ? (totalCollateralETH_ + depositOrWithdrawInETH_)
-            : (totalCollateralETH_ - depositOrWithdrawInETH_);
-        if (totalCollateralETH_ != 0) {
-            uint256 ratio = totalCollateralETH_ == 0 ? 0 : totalDebtETH_ * PRECISION / totalCollateralETH_;
+        ICWETHV3.AssetInfo memory assetInfo_ = compoundWethComet.getAssetInfoByAddress(RSETH);
+        uint256 price_ = compoundWethComet.getPrice(assetInfo_.priceFeed) * 1e10;
+        uint256 totalCollateral_ = compoundWethComet.collateralBalanceOf(address(this), RSETH);
+        uint256 totalDebt_ = compoundWethComet.borrowBalanceOf(address(this)) * PRECISION / price_;
+        totalCollateral_ =
+            _isDepositOrWithdraw ? (totalCollateral_ + _depositOrWithdraw) : (totalCollateral_ - _depositOrWithdraw);
+        if (totalCollateral_ != 0) {
+            uint256 ratio = totalCollateral_ == 0 ? 0 : totalDebt_ * PRECISION / totalCollateral_;
             isLeverage_ = ratio < safeProtocolRatio ? true : false;
             if (isLeverage_) {
-                loanAmount_ = (safeProtocolRatio * totalCollateralETH_ - totalDebtETH_ * PRECISION)
-                    / (PRECISION - safeProtocolRatio);
+                loanAmount_ =
+                    (safeProtocolRatio * totalCollateral_ - totalDebt_ * PRECISION) / (PRECISION - safeProtocolRatio);
             } else {
-                loanAmount_ = (totalDebtETH_ * PRECISION - safeProtocolRatio * totalCollateralETH_)
-                    / (PRECISION - safeProtocolRatio);
+                loanAmount_ =
+                    (totalDebt_ * PRECISION - safeProtocolRatio * totalCollateral_) / (PRECISION - safeProtocolRatio);
             }
         }
     }
 
+    function getETHByRsETH(uint256 _rsethAmount) public view returns (uint256) {
+        uint256 rate_ = kelpOracle.rsETHPrice();
+        return _rsethAmount * rate_ / PRECISION;
+    }
+
+    function getRsETHByETH(uint256 _ethAmount) public view returns (uint256) {
+        return kelpPool.getRsETHAmountToMint(ETH, _ethAmount);
+    }
+
+    function getKelpUnstakingAmount() public view returns (uint256) {
+        if (requestId == bytes32(0)) return 0;
+        (, uint256 expectedAssetAmount_,) = kelpWithdrawal.withdrawalRequests(requestId);
+        return expectedAssetAmount_;
+    }
+
     /**
      * @dev Get the protocol account data.
-     * @return stEthAmount_ The amount of supplied rsETH in stETH.
-     * @return debtWEthAmount_ The amount of debt in WETH.
+     * @return underlyingTokenAmount_ The amount of supplied in ETH.
+     * @return borrowedTokenAmount_ The amount of debt in WETH.
      */
-    function getProtocolAccountData() public view returns (uint256 stEthAmount_, uint256 debtWEthAmount_) {
-        uint256 rsETHAmount_ = collateralAssetsUser();
-        debtWEthAmount_ = borrowAssetsUser();
-        stEthAmount_ = getStETHByRsETH(rsETHAmount_);
+    function getProtocolAccountData()
+        public
+        view
+        returns (uint256 underlyingTokenAmount_, uint256 borrowedTokenAmount_)
+    {
+        underlyingTokenAmount_ = compoundWethComet.collateralBalanceOf(address(this), RSETH);
+        borrowedTokenAmount_ = compoundWethComet.borrowBalanceOf(address(this));
+        underlyingTokenAmount_ = getETHByRsETH(underlyingTokenAmount_);
+    }
+
+    /**
+     * @dev Get the amount of net assets in the protocol.
+     * @return net_ The amount of net assets.
+     */
+    function getProtocolNetAssets() public view returns (uint256 net_) {
+        (uint256 ethAmount_, uint256 debtEthAmount_) = getProtocolAccountData();
+        net_ = ethAmount_ - debtEthAmount_;
     }
 
     /**
@@ -432,63 +461,28 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
      * @return netAssets The total amount of net assets.
      */
     function getNetAssets() public view override returns (uint256) {
-        uint256 rsETHAmount_ = collateralAssetsUser() + IERC20(RSETH).balanceOf(address(this));
-        uint256 unstaking_ = getKelpUnstakingAmount();
-        uint256 debtETHAmount_ = borrowAssetsUser();
-
-        return getStETHByRsETH(rsETHAmount_) + getTotalETHBalance() + unstaking_ - debtETHAmount_;
+        uint256 rsETHbal_ = IERC20(RSETH).balanceOf(address(this));
+        return getProtocolNetAssets() + getETHByRsETH(rsETHbal_) + getKelpUnstakingAmount() + getTotalETHBalance();
     }
 
-    /**
-     * @dev Execute a deposit operation in the Morpho Blue protocol.
-     * @param _asset The address of the asset to deposit.
-     * @param _amount The amount of the asset to deposit.
-     */
-    function executeDeposit(address _asset, uint256 _amount) internal {
-        if (_asset != RSETH) revert Errors.InvalidAsset();
+    function executeDeposit(address, uint256 _amount) internal {
         if (_amount == 0) return;
-        IMorpho(MORPHO_POOL).supplyCollateral(getMarketParams(), _amount, address(this), "");
+        compoundWethComet.supply(RSETH, _amount);
     }
 
-    /**
-     * @dev Execute a withdrawal operation in the Morpho Blue protocol.
-     * @param _asset The address of the asset to withdraw.
-     * @param _amount The amount of the asset to withdraw.
-     */
-    function executeWithdraw(address _asset, uint256 _amount) internal {
-        if (_asset != RSETH) revert Errors.InvalidAsset();
+    function executeWithdraw(address, uint256 _amount) internal {
         if (_amount == 0) return;
-        IMorpho(MORPHO_POOL).withdrawCollateral(getMarketParams(), _amount, address(this), address(this));
+        compoundWethComet.withdraw(RSETH, _amount);
     }
 
-    /**
-     * @dev Execute a borrow operation in the Morpho Blue protocol.
-     * @param _asset The address of the asset to borrow.
-     * @param _amount The amount of the asset to borrow.
-     */
-    function executeBorrow(address _asset, uint256 _amount) internal {
-        if (_asset != WETH) revert Errors.InvalidAsset();
+    function executeBorrow(address, uint256 _amount) internal {
         if (_amount == 0) return;
-        IMorpho(MORPHO_POOL).borrow(getMarketParams(), _amount, 0, address(this), address(this));
+        compoundWethComet.withdraw(WETH, _amount);
     }
 
-    /**
-     * @dev Execute a repay operation in the Morpho Blue protocol.
-     * @param _asset The address of the asset to repay.
-     * @param _amount The amount of the asset to repay.
-     */
-    function executeRepay(address _asset, uint256 _amount) internal {
-        if (_asset != WETH) revert Errors.InvalidAsset();
+    function executeRepay(address, uint256 _amount) internal {
         if (_amount == 0) return;
-        IMorpho(MORPHO_POOL).repay(getMarketParams(), _amount, 0, address(this), "");
-    }
-
-    /**
-     * @dev Enter the Morpho Blue protocol.
-     */
-    function enterProtocol() internal {
-        IERC20(RSETH).forceApprove(MORPHO_POOL, type(uint256).max);
-        IERC20(WETH).forceApprove(MORPHO_POOL, type(uint256).max);
+        compoundWethComet.supply(WETH, _amount);
     }
 
     /**
@@ -581,7 +575,12 @@ contract StrategyMorphoBlueRSETH is IStrategy, MultiETH, OneInchCallerV6, Ownabl
         IERC20(RSETH).safeIncreaseAllowance(ONEINCH_ROUTER, _loanAmount);
         (uint256 return_,) = executeSwap(_loanAmount, RSETH, WETH, _swapData, _swapGetMin);
         uint256 repayFlashloan_ = _loanAmount + _fee;
-        uint256 borrowAgain_ = repayFlashloan_ - return_;
-        executeBorrow(WETH, borrowAgain_);
+        if (repayFlashloan_ > return_) {
+            uint256 borrowAgain_ = repayFlashloan_ - return_;
+            executeBorrow(WETH, borrowAgain_);
+        } else if (repayFlashloan_ < return_) {
+            uint256 rapayAgain_ = return_ - repayFlashloan_;
+            executeRepay(WETH, rapayAgain_);
+        }
     }
 }

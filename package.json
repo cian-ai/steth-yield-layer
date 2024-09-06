@@ -24,6 +24,7 @@
         "hybrid": "npx hardhat run scripts/vault/strategies/hybrid.ts",
         "morpho": "npx hardhat run scripts/vault/strategies/morpho.ts",
         "uniswapV3": "npx hardhat run scripts/vault/strategies/uniswapV3.ts",
+        "compound": "npx hardhat run scripts/vault/strategies/compound.ts",
         "migrate": "npx hardhat run scripts/vault/migrate/migrate.ts"
     },
     "dependencies": {

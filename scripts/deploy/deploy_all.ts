@@ -48,10 +48,15 @@ async function deploy_pool() {
     const StrategyHybridWeETHImplementation = await deploy_contract("StrategyHybridWeETH");
     const StrategyMorphoBlueImplementation = await deploy_contract("StrategyMorphoBlueRSETH");
     const StrategyUniswapV3Implementation = await deploy_contract("StrategyUniswapV3");
+    const StrategyCompoundRSETHImplementation = await deploy_contract("StrategyCompoundRSETH");
     const HybridLongShortAaveAdapter = await deploy_contract("AaveLendingAdapter");
     const HybridLongShortSparkAdapter = await deploy_contract("SparkLendingAdapter");
     const selector = web3.eth.abi.encodeFunctionSignature("initialize(bytes)");
-    const protocolRatio = oneEther.mul(8000).div(10000); // 8000/10000 = 80% aave v3
+
+    const aaveRatio = oneEther.mul(9230).div(10000); // 9230/10000 = 92.3% aave v3
+    const morphoRatio = oneEther.mul(8000).div(10000); // 8000/10000 = 80% morpho
+    const compoundRatio = oneEther.mul(7777).div(10000);
+
     const MultiSigAddr = MultiSig.address;
     const MultiSiger = await impersonateAccount(MultiSig.address);
     const flashloanHelper = "0x49d9409111a6363d82C4371fFa43fAEA660C917B";
@@ -64,22 +69,19 @@ async function deploy_pool() {
 
     let aavev3Args = web3.eth.abi.encodeParameters(
         ["uint256", "address", "address", "address"],
-        [protocolRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
+        [aaveRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
     );
     aavev3Args = web3.eth.abi.encodeParameters(["bytes"], [aavev3Args]);
     const totalStategyAaveV3Args = selector + aavev3Args.substring(2, aavev3Args.length);
 
     let morphoArgs = web3.eth.abi.encodeParameters(
         ["uint256", "address", "address", "address"],
-        [protocolRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
+        [morphoRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
     );
     morphoArgs = web3.eth.abi.encodeParameters(["bytes"], [morphoArgs]);
     const totalStategyMorphoArgs = selector + morphoArgs.substring(2, morphoArgs.length);
 
-    let steakhouseArgs = web3.eth.abi.encodeParameters(
-        ["address", "address", "address"],
-        [chainAddrData.steth, MultiSigAddr, rebalancer]
-    );
+    let steakhouseArgs = web3.eth.abi.encodeParameters(["address", "address", "address"], [chainAddrData.steth, MultiSigAddr, rebalancer]);
     steakhouseArgs = web3.eth.abi.encodeParameters(["bytes"], [steakhouseArgs]);
     const totalSteakhouseArgsArgs = selector + steakhouseArgs.substring(2, steakhouseArgs.length);
 
@@ -104,6 +106,13 @@ async function deploy_pool() {
     let uniswapv3Args = web3.eth.abi.encodeParameters(["address", "address"], [MultiSigAddr, rebalancer]);
     uniswapv3Args = web3.eth.abi.encodeParameters(["bytes"], [uniswapv3Args]);
     const totalUniswapv3Args = selector + uniswapv3Args.substring(2, uniswapv3Args.length);
+
+    let compoundArgs = web3.eth.abi.encodeParameters(
+        ["uint256", "address", "address", "address"],
+        [compoundRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
+    );
+    compoundArgs = web3.eth.abi.encodeParameters(["bytes"], [compoundArgs]);
+    const totalStategyCompoundArgsArgs = selector + compoundArgs.substring(2, compoundArgs.length);
 
     const VaultImplementation = await deploy_contract("VaultYieldETH");
     const marketCapacity = oneEther.mul(10000);
@@ -151,53 +160,23 @@ async function deploy_pool() {
     );
     args = web3.eth.abi.encodeParameters(["bytes"], [args]);
     const totalArgs = selector + args.substring(2, args.length);
-    const Vault = await deploy_contract("TransparentUpgradeableProxy", [
-        VaultImplementation.address,
-        MultiSigAddr,
-        totalArgs,
-    ]);
+    const Vault = await deploy_contract("TransparentUpgradeableProxy", [VaultImplementation.address, MultiSigAddr, totalArgs]);
     const VaultContract = await ethers.getContractAt("VaultYieldETH", Vault.address);
 
     const positionLimit = 3000; // 3000/10000 = 30%
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyETHConverterImplementation.address,
-        totalETHConverterArgs,
-        positionLimit
-    );
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyETHConverterImplementation.address, totalETHConverterArgs, positionLimit);
 
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyAAVEV3Implementation.address,
-        totalStategyAaveV3Args,
-        positionLimit
-    );
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyAAVEV3Implementation.address, totalStategyAaveV3Args, positionLimit);
 
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyAAVEV3LIDOImplementation.address,
-        totalStategyAaveV3Args,
-        positionLimit
-    );
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyAAVEV3LIDOImplementation.address, totalStategyAaveV3Args, positionLimit);
 
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyMellowSteakhouseImplementation.address,
-        totalSteakhouseArgsArgs,
-        positionLimit
-    );
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyHybridWeETHImplementation.address,
-        totalHybridArgsArgs,
-        positionLimit
-    );
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyMorphoBlueImplementation.address,
-        totalStategyMorphoArgs,
-        positionLimit
-    );
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyMellowSteakhouseImplementation.address, totalSteakhouseArgsArgs, positionLimit);
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyHybridWeETHImplementation.address, totalHybridArgsArgs, positionLimit);
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyMorphoBlueImplementation.address, totalStategyMorphoArgs, positionLimit);
 
-    await VaultContract.connect(MultiSiger).createStrategy(
-        StrategyUniswapV3Implementation.address,
-        totalUniswapv3Args,
-        positionLimit
-    );
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyUniswapV3Implementation.address, totalUniswapv3Args, positionLimit);
+
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyCompoundRSETHImplementation.address, totalStategyCompoundArgsArgs, positionLimit);
 
     const strategies = await VaultContract.strategies();
     console.log("strategies = ", strategies);
@@ -208,13 +187,9 @@ async function deploy_pool() {
     const StrategyHybridWeETH = await ethers.getContractAt("StrategyHybridWeETH", strategies[4]);
     const StrategyMorphoBlueRSETH = await ethers.getContractAt("StrategyMorphoBlueRSETH", strategies[5]);
     const StrategyUniswapV3 = await ethers.getContractAt("StrategyUniswapV3", strategies[6]);
+    const StrategyCompoundRSETH = await ethers.getContractAt("StrategyCompoundRSETH", strategies[7]);
 
-    const RedeemOperator = await deploy_contract("RedeemOperator", [
-        MultiSigAddr,
-        Vault.address,
-        Manager.address,
-        feeReceiver,
-    ]);
+    const RedeemOperator = await deploy_contract("RedeemOperator", [MultiSigAddr, Vault.address, Manager.address, feeReceiver]);
 
     Object.assign(ALL, {
         Manager,
@@ -226,6 +201,7 @@ async function deploy_pool() {
         StrategyHybridWeETHImplementation,
         StrategyMorphoBlueImplementation,
         StrategyUniswapV3Implementation,
+        StrategyCompoundRSETHImplementation,
         HybridLongShortAaveAdapter,
         HybridLongShortSparkAdapter,
         StrategyETHConverter,
@@ -235,6 +211,7 @@ async function deploy_pool() {
         StrategyHybridWeETH,
         StrategyMorphoBlueRSETH,
         StrategyUniswapV3,
+        StrategyCompoundRSETH,
         VaultImplementation,
         Vault,
         RedeemOperator,
@@ -265,6 +242,7 @@ async function writeToFile() {
         StrategyHybridWeETHImplementation: (ALL as any).StrategyHybridWeETHImplementation.address,
         StrategyMorphoBlueImplementation: (ALL as any).StrategyMorphoBlueImplementation.address,
         StrategyUniswapV3Implementation: (ALL as any).StrategyUniswapV3Implementation.address,
+        StrategyCompoundRSETHImplementation: (ALL as any).StrategyCompoundRSETHImplementation.address,
         StrategyETHConverter: (ALL as any).StrategyETHConverter.address,
         StrategyAAVEV3: (ALL as any).StrategyAAVEV3.address,
         StrategyAAVEV3LIDO: (ALL as any).StrategyAAVEV3LIDO.address,
@@ -272,6 +250,7 @@ async function writeToFile() {
         StrategyHybridWeETH: (ALL as any).StrategyHybridWeETH.address,
         StrategyMorphoBlueRSETH: (ALL as any).StrategyMorphoBlueRSETH.address,
         StrategyUniswapV3: (ALL as any).StrategyUniswapV3.address,
+        StrategyCompoundRSETH: (ALL as any).StrategyCompoundRSETH.address,
         HybridLongShortAaveAdapter: (ALL as any).HybridLongShortAaveAdapter.address,
         HybridLongShortSparkAdapter: (ALL as any).HybridLongShortSparkAdapter.address,
         VaultImplementation: (ALL as any).VaultImplementation.address,
