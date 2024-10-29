@@ -12,7 +12,7 @@ const { LedgerSigner } = require("@anders-t/ethers-ledger");
 const Web3 = require("web3");
 const web3 = new Web3(CURRENT_RPC);
 const ledger = new LedgerSigner(ethers.provider);
-var signer;
+var signer: any;
 
 const UtilAddress = {
     DaiFlashMinter: "0x60744434d6339a6B27d73d9Eda62b6F66a0a04FA",
@@ -49,6 +49,7 @@ async function deploy_pool() {
     const StrategyMorphoBlueImplementation = await deploy_contract("StrategyMorphoBlueRSETH");
     const StrategyUniswapV3Implementation = await deploy_contract("StrategyUniswapV3");
     const StrategyCompoundRSETHImplementation = await deploy_contract("StrategyCompoundRSETH");
+    const StrategyAAVEV3EzETHImplementation = await deploy_contract("StrategyAAVEV3EzETH");
     const HybridLongShortAaveAdapter = await deploy_contract("AaveLendingAdapter");
     const HybridLongShortSparkAdapter = await deploy_contract("SparkLendingAdapter");
     const selector = web3.eth.abi.encodeFunctionSignature("initialize(bytes)");
@@ -67,17 +68,15 @@ async function deploy_pool() {
     ETHConverterArgs = web3.eth.abi.encodeParameters(["bytes"], [ETHConverterArgs]);
     const totalETHConverterArgs = selector + ETHConverterArgs.substring(2, ETHConverterArgs.length);
 
-    let aavev3Args = web3.eth.abi.encodeParameters(
-        ["uint256", "address", "address", "address"],
-        [aaveRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
-    );
+    let aavev3Args = web3.eth.abi.encodeParameters(["uint256", "address", "address", "address"], [aaveRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]);
+    let aaveV3EzArgs = web3.eth.abi.encodeParameters(["uint256", "address", "address", "address"], [morphoRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]);
     aavev3Args = web3.eth.abi.encodeParameters(["bytes"], [aavev3Args]);
+    aaveV3EzArgs = web3.eth.abi.encodeParameters(["bytes"], [aaveV3EzArgs]);
     const totalStategyAaveV3Args = selector + aavev3Args.substring(2, aavev3Args.length);
+    const totalStrategyEzArgs = selector + aaveV3EzArgs.substring(2, aaveV3EzArgs.length);
+    console.log("totalStrategyEzArgs = ", totalStrategyEzArgs);
 
-    let morphoArgs = web3.eth.abi.encodeParameters(
-        ["uint256", "address", "address", "address"],
-        [morphoRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
-    );
+    let morphoArgs = web3.eth.abi.encodeParameters(["uint256", "address", "address", "address"], [morphoRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]);
     morphoArgs = web3.eth.abi.encodeParameters(["bytes"], [morphoArgs]);
     const totalStategyMorphoArgs = selector + morphoArgs.substring(2, morphoArgs.length);
 
@@ -94,10 +93,7 @@ async function deploy_pool() {
             [l2Receiver],
             [UtilAddress.BalancerERC3156, UtilAddress.DaiFlashMinter, UtilAddress.GHOFlashMinter],
             [HybridLongShortAaveAdapter.address, HybridLongShortSparkAdapter.address],
-            [
-                HybridLongShortAaveAdapter.interface.encodeFunctionData("init", [PoolAddress.AavePool]),
-                HybridLongShortSparkAdapter.interface.encodeFunctionData("init", [PoolAddress.SparkPool]),
-            ],
+            [HybridLongShortAaveAdapter.interface.encodeFunctionData("init", [PoolAddress.AavePool]), HybridLongShortSparkAdapter.interface.encodeFunctionData("init", [PoolAddress.SparkPool])],
         ]
     );
     hybridArgs = web3.eth.abi.encodeParameters(["bytes"], [hybridArgs]);
@@ -107,10 +103,7 @@ async function deploy_pool() {
     uniswapv3Args = web3.eth.abi.encodeParameters(["bytes"], [uniswapv3Args]);
     const totalUniswapv3Args = selector + uniswapv3Args.substring(2, uniswapv3Args.length);
 
-    let compoundArgs = web3.eth.abi.encodeParameters(
-        ["uint256", "address", "address", "address"],
-        [compoundRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]
-    );
+    let compoundArgs = web3.eth.abi.encodeParameters(["uint256", "address", "address", "address"], [compoundRatio.toString(), MultiSigAddr, flashloanHelper, rebalancer]);
     compoundArgs = web3.eth.abi.encodeParameters(["bytes"], [compoundArgs]);
     const totalStategyCompoundArgsArgs = selector + compoundArgs.substring(2, compoundArgs.length);
 
@@ -178,6 +171,8 @@ async function deploy_pool() {
 
     await VaultContract.connect(MultiSiger).createStrategy(StrategyCompoundRSETHImplementation.address, totalStategyCompoundArgsArgs, positionLimit);
 
+    await VaultContract.connect(MultiSiger).createStrategy(StrategyAAVEV3EzETHImplementation.address, totalStrategyEzArgs, positionLimit);
+
     const strategies = await VaultContract.strategies();
     console.log("strategies = ", strategies);
     const StrategyETHConverter = await ethers.getContractAt("StrategyETHConverter", strategies[0]);
@@ -188,8 +183,11 @@ async function deploy_pool() {
     const StrategyMorphoBlueRSETH = await ethers.getContractAt("StrategyMorphoBlueRSETH", strategies[5]);
     const StrategyUniswapV3 = await ethers.getContractAt("StrategyUniswapV3", strategies[6]);
     const StrategyCompoundRSETH = await ethers.getContractAt("StrategyCompoundRSETH", strategies[7]);
+    const StrategyAAVEV3EzETH = await ethers.getContractAt("StrategyAAVEV3EzETH", strategies[8]);
 
     const RedeemOperator = await deploy_contract("RedeemOperator", [MultiSigAddr, Vault.address, Manager.address, feeReceiver]);
+
+    const AaveV3FlashLeverageHelper = await deploy_contract("AaveV3FlashLeverageHelper", [MultiSigAddr, StrategyAAVEV3EzETH.address]);
 
     Object.assign(ALL, {
         Manager,
@@ -202,6 +200,7 @@ async function deploy_pool() {
         StrategyMorphoBlueImplementation,
         StrategyUniswapV3Implementation,
         StrategyCompoundRSETHImplementation,
+        StrategyAAVEV3EzETHImplementation,
         HybridLongShortAaveAdapter,
         HybridLongShortSparkAdapter,
         StrategyETHConverter,
@@ -212,9 +211,11 @@ async function deploy_pool() {
         StrategyMorphoBlueRSETH,
         StrategyUniswapV3,
         StrategyCompoundRSETH,
+        StrategyAAVEV3EzETH,
         VaultImplementation,
         Vault,
         RedeemOperator,
+        AaveV3FlashLeverageHelper,
     });
 }
 
@@ -243,6 +244,7 @@ async function writeToFile() {
         StrategyMorphoBlueImplementation: (ALL as any).StrategyMorphoBlueImplementation.address,
         StrategyUniswapV3Implementation: (ALL as any).StrategyUniswapV3Implementation.address,
         StrategyCompoundRSETHImplementation: (ALL as any).StrategyCompoundRSETHImplementation.address,
+        StrategyAAVEV3EzETHImplementation: (ALL as any).StrategyAAVEV3EzETHImplementation.address,
         StrategyETHConverter: (ALL as any).StrategyETHConverter.address,
         StrategyAAVEV3: (ALL as any).StrategyAAVEV3.address,
         StrategyAAVEV3LIDO: (ALL as any).StrategyAAVEV3LIDO.address,
@@ -251,11 +253,13 @@ async function writeToFile() {
         StrategyMorphoBlueRSETH: (ALL as any).StrategyMorphoBlueRSETH.address,
         StrategyUniswapV3: (ALL as any).StrategyUniswapV3.address,
         StrategyCompoundRSETH: (ALL as any).StrategyCompoundRSETH.address,
+        StrategyAAVEV3EzETH: (ALL as any).StrategyAAVEV3EzETH.address,
         HybridLongShortAaveAdapter: (ALL as any).HybridLongShortAaveAdapter.address,
         HybridLongShortSparkAdapter: (ALL as any).HybridLongShortSparkAdapter.address,
         VaultImplementation: (ALL as any).VaultImplementation.address,
         Vault: (ALL as any).Vault.address,
         RedeemOperator: (ALL as any).RedeemOperator.address,
+        AaveV3FlashLeverageHelper: (ALL as any).AaveV3FlashLeverageHelper.address,
     };
     console.log(addresses);
     let data = JSON.stringify(addresses);
