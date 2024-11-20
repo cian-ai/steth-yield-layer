@@ -31,6 +31,11 @@ interface ILRTDepositPool {
     event ETHSwappedForLST(uint256 ethAmount, address indexed toAsset, uint256 returnAmount);
     event EthTransferred(address to, uint256 amount);
 
+    function depositETH(
+        uint256 minRSETHAmountExpected,
+        string calldata referralId
+    ) external payable;
+
     // functions
     function depositAsset(
         address asset,
